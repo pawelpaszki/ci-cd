@@ -48,12 +48,11 @@
                     }
                 }
                 stage('Run the smoke tests'){
-                    dir('tests'){
+                    dir('test-suites/backend-testsuite') {
                         sh '''
                             npm install
                         '''
-                    }
-                    dir('tests/backend-testsuite'){    
+
                         String output = sh returnStdout: true, script: 'gulp smoke || true'
 
                         // To see the output in Jenkins build console log as well
@@ -69,7 +68,7 @@
                 }
                 stage('Publish test results') {
                     if(publishTestResults) {
-                        dir('tests/backend-testsuite/reports/') {
+                        dir('test-suites/backend-testsuite/reports/') {
                             archiveArtifacts 'smoke.xml'                  
                             junit allowEmptyResults:true, testResults: 'smoke.xml'
                         }

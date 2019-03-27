@@ -30,7 +30,7 @@
           description: 'evals username used to create the address'
     dsl: |
         timeout(60) { ansiColor('gnome-terminal') { timestamps {
-            node('cirhos_rhel7'){
+            node('cirhos_rhel7') {
 
                 Boolean publishTestResults = true
 
@@ -40,12 +40,11 @@
                     }
                 }
                 stage('Run the enmasse address creation test'){
-                    dir('tests'){
+                    dir('test-suites/backend-testsuite') {
                         sh '''
                             npm install
                         '''
-                    }
-                    dir('tests/backend-testsuite'){    
+ 
                         sh '''
                             gulp address-create | tee output.txt
                         '''
@@ -61,7 +60,7 @@
                 }
                 stage('Publish test results') {
                     if(publishTestResults) {
-                        dir('tests/backend-testsuite/reports/') {
+                        dir('test-suites/backend-testsuite/reports/') {
                             archiveArtifacts 'address-create.xml'                  
                             junit allowEmptyResults:true, testResults: 'address-create.xml'
                         }
