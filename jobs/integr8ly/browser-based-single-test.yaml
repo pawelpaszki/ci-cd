@@ -62,6 +62,7 @@
                                 # Disable starting Selenium, Docker is used instead
                                 sed -i 's/"start_process" : true,/"start_process" : false,/g' nightwatch.json
                                 rm -rf screenshots reports # so that any leftovers from past builds are not archived
+                                oc login ${CLUSTER_URL} -u ${ADMIN_USERNAME} -p ${ADMIN_PASSWORD}
                                 npm install
                                 npm test ${TEST_TO_RUN}
                                 """   
