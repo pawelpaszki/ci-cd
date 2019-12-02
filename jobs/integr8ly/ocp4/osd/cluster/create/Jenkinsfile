@@ -8,48 +8,39 @@ String installConfigDirectory = ""
 String rootWorkspaceDir = ""
 String clusterInfoFileName = "clusterInfo.json"
 String clusterCredentialsFileName = "clusterCredentials.json"
-String apiPrefix = "/api/clusters_mgmt/v1/clusters"
 
 def err = null
-String clusterID = ""
+String apiURL = ""
+String adminPassword = ""
+String domainName = ""
 
-node("cirhos_rhel7") {
-    timeout(120) { ansiColor("gnome-terminal") { timestamps {
-        try {
-            currentBuild.displayName = "${currentBuild.displayName} ${clusterName}"
-            
-            stage("Prepare the repo to store created cluster information") {
+try {
+    timeout(240) { ansiColor('gnome-terminal') { timestamps {
+        node('cirhos_rhel7') {
+
+            stage("Make sure cluster name is unique") {
                 dir("rhmi-jenkins") {
                     git branch: "master", url: "https://gitlab.cee.redhat.com/integreatly-qe/rhmi-jenkins.git"
-                    def dirExists = fileExists(clusterInfoDirectory)
-                    if (dirExists) {
-                        error "[ERROR] Configuration files found for ${clusterName}! Make sure that the cluster name is unique"
-                    } 
-                    sh "mkdir -p ${clusterInfoDirectory}"
+                    if (TO_DO.contains('provision')) {
+                        def dirExists = fileExists(clusterInfoDirectory)
+                        while (dirExists) {
+                            clusterName = "${clusterName}1"
+                            clusterInfoDirectory = "osd_clusters/" + clusterName
+                            dirExists = fileExists(clusterInfoDirectory)
+                        }
+                    }
+                }
+            }
+            
+            stage ('Provision') {
+                if (TO_DO.contains('provision')) {
+                    provisionCluster(clusterName)
+                } else {
+                    println 'Provision skipped'
                 }
             } // stage
             
-            stage("Update the cluster creation template information") {
-                dir("rhmi-jenkins") {
-                    sh(
-                        returnStdout: false,
-                        script: """
-                            cp templates/cluster.json ${clusterInfoDirectory}
-                            sed -i 's/CLUSTER_NAME/${clusterName}/g' ${clusterInfoDirectory}/cluster.json
-                            echo 'Creating OpenShift 4 OSD cluster with the following configuration:'
-                            cat ${clusterInfoDirectory}/cluster.json
-                        """
-                    )
-                }
-            } // stage
-
-            stage("login to ocm") {
-                withCredentials([string(credentialsId: "${OCM_TOKEN}", variable: "OCM_ACCESS_TOKEN")]) {
-                    sh "ocm login --url=https://api.stage.openshift.com/ --token=${OCM_ACCESS_TOKEN}"
-                }
-            } // stage
-
-            stage("Push the cluster template to GitLab") {
+            stage ('Obtain cluster info') {
                 withCredentials([string(credentialsId: "gitlab-access-token", variable: "GITLAB_ACCESS_TOKEN")]) {
                     dir("rhmi-jenkins") {
                         sh(
@@ -58,89 +49,118 @@ node("cirhos_rhel7") {
                                 git remote add jenkins https://oauth2:${GITLAB_ACCESS_TOKEN}@gitlab.cee.redhat.com/integreatly-qe/rhmi-jenkins.git | true
                                 git config --global user.email "integreatly-qe@redhat.com" | true
                                 git config --global user.name "rhmi-jenkins-bot" | true
-                                git add -A
-                                git commit -m 'cluster template created: ${clusterName}'
-                                git push jenkins master
+                                git pull jenkins master | true
                             """
                         )
-                    }
-                }
-            } // stage
-            
-            stage("Begin cluster creation") {
-                rootWorkspaceDir = sh (
-                    script: "pwd",
-                    returnStdout: true
-                ).trim()
-                installConfigDirectory = rootWorkspaceDir + "/rhmi-jenkins/" + clusterInfoDirectory + "/"
-                sh "ocm post ${apiPrefix} --body=${installConfigDirectory}cluster.json > ${clusterInfoFileName}"
-                clusterID = sh (
-                    script: "cat ${clusterInfoFileName} | jq -r .id",
-                    returnStdout: true
-                ).trim()
-            } // stage
-
-            stage("Check if the cluster is ready") {
-                Boolean isReady = isClusterReady(clusterID, apiPrefix)
-                while (!isReady) {
-                    println "Cluster is not ready yet"
-                    sleep time: 5, unit: 'MINUTES'
-                    isReady = isClusterReady(clusterID, apiPrefix)
-                }
-            } // stage
-
-            stage("Obtain and persist cluster's credentials") {
-                Boolean areCredentialsAvailable = credentialsAvailable(clusterID, apiPrefix)
-                while (!areCredentialsAvailable) {
-                    println "Cluster credentials not available yet"
-                    sleep time: 3, unit: 'MINUTES'
-                    areCredentialsAvailable = credentialsAvailable(clusterID, apiPrefix)
-                }
-                sh "ocm get ${apiPrefix}/${clusterID}/credentials > ${installConfigDirectory}${clusterCredentialsFileName}"
-                sh "ocm get ${apiPrefix}/${clusterID} > ${installConfigDirectory}${clusterInfoFileName}"
-                withCredentials([string(credentialsId: "gitlab-access-token", variable: "GITLAB_ACCESS_TOKEN")]) {
-                    dir("rhmi-jenkins") {
-                        sh(
-                            returnStdout: false,
-                            script: """
-                                git pull jenkins master
-                                git add -A
-                                git commit -m 'cluster created: ${clusterName}'
-                                git push jenkins master
-                            """
+                        def dirExists = fileExists(clusterInfoDirectory)
+                        if (!dirExists) {
+                            error "[ERROR] no configuration files found for ${clusterName}! Make sure that the cluster exists!"
+                        } 
+                        rootWorkspaceDir = sh (
+                            script: "pwd",
+                            returnStdout: true
+                        ).trim()
+                        installConfigDirectory = rootWorkspaceDir + "/" + clusterInfoDirectory + "/"
+                        apiURL = sh (
+                            script: "cat ${installConfigDirectory}${clusterInfoFileName} | jq -r .api.url",
+                            returnStdout: true
+                        )
+                        domainName = apiURL.substring((apiURL.indexOf(clusterName) + clusterName.length() + 1), apiURL.lastIndexOf(":"))
+                        adminPassword = sh (
+                            script: "cat ${installConfigDirectory}${clusterCredentialsFileName} | jq -r .admin.password",
+                            returnStdout: true
                         )
                     }
                 }
             } // stage
 
-            stage("Logout from ocm") {
-                sh "ocm logout"
+            stage ('Install') {
+                install(clusterName, domainName, adminPassword)
+            } // stage
+
+            stage ('Add htpasswd IDP') {
+                addIDP(clusterName, domainName, adminPassword)
+            } // stage
+
+            stage ('Test') {
+                if (TO_DO.contains('tests')) {
+                    test(clusterName, domainName, adminPassword)
+                } else {
+                    println 'Tests skipped'
+                }
             } // stage
             
-        } catch (caughtError){
-            currentBuild.result = "FAILURE"
-            err = caughtError
-            println caughtError
-        } finally {
-            notifyBuild(currentBuild.result, err)
-        }
+            stage ('Deprovision') {
+                if (TO_DO.contains('destroy')) {
+                    deprovisionCluster(clusterName)
+                } else {
+                    println 'Deprovision skipped'
+                }
+            } // stage
+
+        } // node
     }}} // timeout, ansiColor, timestamps
-} // node
-
-def isClusterReady(clusterID, apiPrefix) {
-    String clusterStatus = sh (
-        script: "ocm get ${apiPrefix}/${clusterID}/status | jq -r .state",
-        returnStdout: true
-    ).trim()
-    return clusterStatus.contains("ready")
+} catch (caughtError){
+    currentBuild.result = 'FAILURE'
+    err = caughtError 
+} finally {
+    notifyBuild(currentBuild.result, err)
 }
 
-def credentialsAvailable(clusterID, apiPrefix) {
-    String credentialsJSON = sh (
-        script: "ocm get ${apiPrefix}/${clusterID}/credentials",
-        returnStdout: true
-    ).trim()
-    return credentialsJSON.contains("kubeadmin")
+// Waiting for ${sleepTime} minutes so that resources scheduled for termination are actually terminated
+def provisionCluster(clusterName) {
+    build job: 'openshift4-osd-cluster-create', parameters: [
+        string(name: 'CLUSTER_NAME', value: clusterName),
+        string(name: 'RECIPIENTS', value: "${RECIPIENTS}")
+    ]
+    sleep time: 15, unit: 'MINUTES'
+}
+
+def install(clusterName, clusterDomain, password) {
+    parameters = [
+        string(name: 'CLUSTER_NAME', value: clusterName),
+        string(name: 'CLUSTER_DOMAIN', value: clusterDomain),
+        string(name: 'ADMIN_PASSWORD', value: password),
+        string(name: 'INTEGREATLY_OPERATOR_BRANCH', value: "${INTEGREATLY_OPERATOR_BRANCH}"),
+        string(name: 'RECIPIENTS', value: "${RECIPIENTS}")
+    ]
+    if (OLM_INSTALLATION.toString() == 'true') {   
+        build (job: 'openshift4-rhmi-olm-install', parameters: parameters)
+    } else {
+        build (job: 'openshift4-rhmi-image-deploy-install', parameters: parameters)
+    }
+    sleep time: 3, unit: 'MINUTES'
+}
+
+def addIDP(clusterName, clusterDomain, password) {
+    build job: 'openshift4-htpasswd-setup', parameters: [
+        string(name: 'CLUSTER_NAME', value: clusterName),
+        string(name: 'CLUSTER_DOMAIN', value: clusterDomain),
+        string(name: 'INTEGREATLY_OPERATOR_BRANCH', value: "${INTEGREATLY_OPERATOR_BRANCH}"),
+        string(name: 'ADMIN_PASSWORD', value: password)
+    ]
+}
+
+def test(clusterName, clusterDomain, password) {
+    build job: 'ocp4-all-tests-executor', parameters: [
+        string(name: 'CLUSTER_NAME', value: clusterName),
+        string(name: 'CLUSTER_DOMAIN', value: clusterDomain),
+        string(name: 'ADMIN_PASSWORD', value: password)
+    ]
+}
+
+def deprovisionCluster(clusterName) {
+    parameters = [
+        string(name: 'CLUSTER_NAME', value: clusterName),
+        string(name: 'RECIPIENTS', value: "${RECIPIENTS}")
+    ]
+
+    buildStatus = build(job: 'openshift4-osd-cluster-deprovision', propagate: false, parameters: parameters).result
+    println "Build finished with ${buildStatus}"
+                    
+    if (buildStatus != 'SUCCESS') {
+        currentBuild.result = 'UNSTABLE'
+    }
 }
 
 def notifyBuild(String buildStatus, err) {
